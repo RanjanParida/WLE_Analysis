@@ -1,0 +1,294 @@
+---
+title: "PML_WLEAnalysis"
+author: "Ranjan Parida"
+date: "Friday, September 21, 2014"
+output:
+  html_document:
+    highlight: pygments
+    number_sections: yes
+---
+
+# INTRODUCTION
+## Context
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, our goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to build a model to predict "how well" the excercise was performed. 
+
+## Data Collection Process
+**Setup**  
+Six participant, fitted with "on-body" sensors and also observed through "ambient sensing", we asked to perform barbell lifts correctly and incorrectly in 5 different ways. The "on-body" sensors were attached to the dumbbell, lumbar belt, glove and arm band of the participants. The "ambient sensor" used was microsoft kinect.
+
+**Participant Demographics**  
+All participants in the experiment were in the age range of 20 to 28 years with little weight lifting experience.
+
+**Experiment**  
+Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions:  
+* Class A - exactly according to the specifcation  
+* Class B - throwing the elbows to the front  
+* Class C - lifting the dumbbell only halfway  
+* Class D - lowering the dumbbell only halfway  
+* Class E - throwing the hips to the front  
+
+These excercises was performed under the supervision of experienced weight lifters.
+
+**Actual Data Collection**  
+Features were collecting using a sliding window approach with different lengths from 0.5 second to 2.5 seconds, with 0.5 second overlap. In each step of the sliding window approach features on the Euler angles (roll, pitch and yaw) were calculated. Also, raw accelerometer, gyroscope and magnetometer readings were observed. For the Euler angles of each of the four sensors, eight features were calculated: mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness, generating in total 96 derived feature sets.
+
+More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).
+
+## Scope
+Predicting the "how well" the weight lifting excercise (specifically, lifting of dumbbell) was performed based on the "accelerometer" data.
+
+#ANALYSIS
+## Training Data
+The data from the above experiment has been made available to us in a [training dataset][1] from Course website. This data is downloaded and loaded to R for analysis.
+```{r setWD, echo=FALSE, cache=TRUE}
+setwd(paste("~/BSS_Training/", 
+            "Coursera_Course 8_Practical Machine Learning/",
+            "Assignment/ActivityData", sep=""))
+```
+```{r download, result=FALSE, cache=TRUE, warning=FALSE}
+setInternet2(TRUE)
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "pml-training.csv" )
+setInternet2(FALSE)
+```
+```{r loadTrainData, cache=TRUE}
+training <- read.csv("pml-training.csv")
+```
+## Test Set for Cross Validation
+A subset of obeservations from the training data set is kept aside for the purposes of validation of the final model, to refine and adjust if needed. This subset is created by using a random sampling.
+```{r vTestData}
+library(caret)
+set.seed(91488)
+inTrain <- createDataPartition(y = training$classe, p=0.75, list=FALSE)
+trainData <- training[inTrain,]
+vTestData <- training[-inTrain,]
+```
+
+## Feature Selection
+As the measured and some of the calculated data has already been made available to us in the training data set, we start the process of feature selection by performing an analysis on the summary of predictors.
+```{r summaryAnalysis, eval=FALSE}
+summary(trainData)
+```
+
+A quick look at the summary (Appendix A) shows their are 160 variables in the training data set, many of the which have over 95% of the values as NAs. 
+
+### Removing variable with high number of observations with NA
+There is no use of using variable with high number of observations with a value of **NA**. So, we eliminate variables with over 95% values as NA from further analysis.
+
+This is accomplished by writing a simple function **rmvNACols** that takes the data set, threshold for elimination as percentage or number as input, and returns a dataset after eliminating the columns that exceeded the threshold. Details of this function has been listed in **Appendix B**. 
+
+```{r rmvNACols, echo=FALSE}
+rmvNAcols <- function (ds, n, count=FALSE, pct=0.5) {
+    cols <- ncol(ds)
+    NAcol <- NULL
+    if(count==FALSE){
+        for(i in 1:cols){
+            nNA <- nrow(ds[is.na(ds[,i]),])
+            if((nNA/length(ds[,i])) > pct){
+                NAcol <- c(NAcol, i)
+            }
+        }
+    }
+    
+    if(count==TRUE){
+        for(i in 1:cols) {
+            if(nrow(ds[is.na(ds[,i]),]) > n){
+                NAcol <- c(NAcol, i)
+            }
+        }
+    }
+    
+    ds[ , -c(NAcol)] 
+    
+}
+
+```
+```{r rmvCols}
+trainData2 <- rmvNAcols(trainData, pct=.95)
+```
+
+### Removing variables with near zero variance
+After removing the variables with high volume of NAs, we are still left with `r ncol(trainData2)` columns. These are still a very high number of variables. These may all be relevant, or may be not. So, we look for variables that have near zero variance and thus would not be contributing a lot of value to the prediction model.
+
+```{r rmvNZV}
+nsv <- nearZeroVar(trainData2, saveMetrics=TRUE)
+trainData3 <- trainData2[,rownames(nsv[nsv$nzv==FALSE,])]
+```
+
+Even after removing near zero variance predictors, we are still left with `r ncol(trainData3) - 1` 
+
+### Excluding non-accelerometer data from the variables
+```{r nonAccelData}
+colnames(trainData3[,1:10])
+```
+As you would note, the first six columns in the remaining variables of the data set are either row identifier, or individual identifier, or timestamp/recording window. Since our task is to decipher if "how well" an excercise is performed based on accelerometer data, we will drop these first six variables as well.
+
+```{r dropNonAccel}
+trainData4 <- trainData3[,-c(1:6)]
+```
+
+We are now left with a data set of 53 columns - 52 predictors and 1 outcome. As our **outcome is categorical** in nature, use of alogrithms like **decision tree or random forrest** make the most sense.
+
+## Algorithm and Parameter Selection
+Through the lecture notes, it is evident that random forrest has a better accuracy. Knowing we need to use this model to predict responses on the test data set for grading, it is evident that we are looking at the **accuracy as a measure** for model selection.
+
+```{r trainModel}
+library(randomForest)
+set.seed(999)
+modelFit1 <- randomForest(classe ~ ., data = trainData4, ntree = 1)
+aCM <- confusionMatrix(predict(modelFit1,newdata=trainData4), trainData4$classe)
+```
+Our first model, with all available predictors, gives an accuracy of `r aCM$overall[1]*100`% with a confidence interval of `r aCM$overall[3]*100`% to `r aCM$overall[4]*100`%. This is relatively accurate model to define base on accelerometer readings. But, before we attempt at making the model more accurate, let us explore the important variables for this model.
+
+```{r varImp}
+vIS <- varImp(modelFit1)
+vIn <- vIS$Overall
+vNames <- rownames(vIS)
+vNames <- vNames[order(vIn, decreasing=TRUE)]
+```
+
+Now, that we have a list of variables in the order of their importance, lets build models with top 10, 20 and 30 variables and observe the loss in accuracy.
+
+```{r trainModel10}
+set.seed(999)
+topTEN <- trainData4[,colnames(trainData4) %in% vNames[1:10]]
+modelFit2 <- randomForest(trainData4$classe ~ ., data = topTEN, ntree = 1)
+t10CM <- confusionMatrix(predict(modelFit2,newdata=topTEN), trainData4$classe)
+```
+
+```{r trainModel20}
+set.seed(999)
+topTwenty <- trainData4[,colnames(trainData4) %in% vNames[1:20]]
+modelFit3 <- randomForest(trainData4$classe ~ ., data = topTwenty, ntree = 1)
+t20CM <- confusionMatrix(predict(modelFit3,newdata=topTwenty), trainData4$classe)
+```
+
+```{r trainModel30}
+set.seed(999)
+topThirty <- trainData4[,colnames(trainData4) %in% vNames[1:30]]
+modelFit4 <- randomForest(trainData4$classe ~ ., data = topThirty, ntree = 1)
+t30CM <- confusionMatrix(predict(modelFit4,newdata=topThirty), trainData4$classe)
+```
+
+From the confusion matrix resutls, one can see that the model with 30 variables has an accuracy of `r t30CM$overall[1]*100`% with a confidence interval of `r t30CM$overall[3]*100`% and `r t30CM$overall[4]*100`%. We have reduced the model by almost 50% predictors while changing the accuracy by only `r (aCM$overall[1] - t30CM$overall[1])*100`%.
+
+At this point, we have two models under consideration,  
+- Model 1 with all the available predictors and an in-sample accuracy of `r aCM$overall[1]*100`%   
+- Model 4 with all 30 of the 52 available predictors and an in-sample accuracy of `r t30CM$overall[1]*100`%
+
+### Boosting the accuracy
+Next we try to boost the accuracy of our two models by increasing the number of trees to 20 for each model. 
+
+```{r boostModel}
+set.seed(999)
+modelFit1 <- randomForest(classe ~ ., data = trainData4, ntree = 20)
+aCM <- confusionMatrix(predict(modelFit1,newdata=trainData4), trainData4$classe)
+```
+```{r boostModel30}
+set.seed(999)
+topThirty <- trainData4[,colnames(trainData4) %in% vNames[1:30]]
+modelFit4 <- randomForest(trainData4$classe ~ ., data = topThirty, ntree = 20)
+t30CM <- confusionMatrix(predict(modelFit4,newdata=topThirty), trainData4$classe)
+```
+
+One would notice that the accuracy `r aCM$overall[1]*100`% & `r t30CM$overall[1]*100`% is nearly equal for both the models under consideration, and that there has been a significant jump in accuracy with boosting. 
+
+Before we move to validation, it might be worthwhile to perform a similar boosting to a model with 10 variables to access the accuracy.
+
+```{r boostModel10}
+set.seed(999)
+topTEN <- trainData4[,colnames(trainData4) %in% vNames[1:10]]
+modelFit2 <- randomForest(trainData4$classe ~ ., data = topTEN, ntree = 20)
+t10CM <- confusionMatrix(predict(modelFit2,newdata=topTEN), trainData4$classe)
+```
+
+With boosting, even this model seems to be fairly accurate at `r t10CM$overall[1]*100`%. If we can have a model with less predictors and almost an equivalent accuracy, it is wise to make a simpler, scalable, interpretable model requiring least amount of data/features.
+
+Thus far, it seems like our model with just 10 variables is sufficiently accurate. So, now we will try out our 3 possible models on the validation set, and pick the one based on accuracy and simplicity.
+
+## Validation
+```{r validation}
+aCMv <- confusionMatrix(predict(modelFit1,newdata=vTestData), vTestData$classe)
+t30CMv <- confusionMatrix(predict(modelFit4,newdata=vTestData), vTestData$classe)
+t10CMv <- confusionMatrix(predict(modelFit2,newdata=vTestData), vTestData$classe)
+```
+
+The validation results seem to be reflective of that there is minimal loss of accuracy, if we simplified the covariants from 52 to 30 to just 10, with out-of sample accuracy of `r aCMv$overall[1]*100`%, `r t30CMv$overall[1]*100`% and `r t10CMv$overall[1]*100`% respectively.
+
+It is also significant the in-sample versus out-of-sample accuracy change in a model with just 10 variable is much larger than that of a model with 30 or all 52 predictors.
+
+
+#Applying Model to the Test Set
+Given the numbers from our analysis, we will move forwar with a model with just 30 variables and apply it to the test set. At this point, we expect the out-of-sample error for the model to be `r t30CMv$overall[1]*100`%
+
+[Test Data][2] has also be made available to us by Coursera.
+
+```{r downloadTest, result=FALSE, cache=TRUE, warning=FALSE}
+setInternet2(TRUE)
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "pml-testing.csv" )
+setInternet2(FALSE)
+```
+```{r loadTestData, cache=TRUE}
+testing <- read.csv("pml-testing.csv")
+```
+```{r testing}
+pclasse <- predict(modelFit2,newdata=testing)
+pclasse
+```
+
+The results of pclasse were then written to text files using the below code and submitted for evaluation.
+
+```{r submission}
+pml_write_files <- function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+pml_write_files(pclasse)
+
+```
+
+All predictions were made accurately for the submission using a model with just 30 variables.
+
+#APPENDIX
+## A | Summary of Predictor
+```{r appAsummaryAnalysis, echo=FALSE}
+summary(trainData)
+```
+
+## B | Function rmvNACols
+```{r appBrmvNACols, eval=FALSE}
+rmvNAcols <- function (ds, n, count=FALSE, pct=0.5) {
+    cols <- ncol(ds)
+    NAcol <- NULL
+    if(count==FALSE){
+        for(i in 1:cols){
+            nNA <- nrow(ds[is.na(ds[,i]),])
+            if((nNA/length(ds[,i])) > pct){
+                NAcol <- c(NAcol, i)
+            }
+        }
+    }
+    
+    if(count==TRUE){
+        for(i in 1:cols) {
+            if(nrow(ds[is.na(ds[,i]),]) > n){
+                NAcol <- c(NAcol, i)
+            }
+        }
+    }
+    
+    print(NAcol)
+    ds[ , -c(NAcol)] 
+    
+}
+
+```
+
+---
+[1]: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+[2]: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
